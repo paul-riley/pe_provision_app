@@ -100,7 +100,7 @@ The requested installation command is:
 curl -k https://pe.caffeine.lan:8140/packages/current/install.bash | sudo bash
 ```
 
-The application implements this as a separate download followed by execution. It uses `curl -f -k -sS -L`, a 30-second connection timeout, and a 600-second overall download timeout. Bash runs only after a successful, nonempty download. The helper already runs as root, so it does not invoke `sudo` again.
+The application implements this as a separate download followed by execution. It uses `curl -f -k -sS -L`, a 30-second connection timeout, and a 600-second overall download timeout. Bash runs only after a successful, nonempty download. The application passes the serial-based certname explicitly as both `main:certname` and `agent:certname`, along with the CSR path and both extension requests, so the installer receives them before its initial Puppet run. It checks the effective agent certname after installation. The helper already runs as root, so it does not invoke `sudo` again.
 
 The `-k` option disables TLS certificate verification, matching the requested command. Installer output appears in the GUI log. The temporary download is removed when the helper exits normally, including handled failures.
 

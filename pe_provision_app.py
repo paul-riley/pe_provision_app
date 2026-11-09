@@ -113,6 +113,17 @@ def write_configuration(files):
                 os.unlink(temporary)
 
 
+def installer_command(installer, serial, store, timezone):
+    """Give the installer the identity before its initial Puppet run."""
+    certname, store, timezone = validate(serial, store, timezone)
+    return ['bash', str(installer),
+            f'main:certname={certname}',
+            f'agent:certname={certname}',
+            f'main:csr_attributes={CONF_DIR / "csr_attributes.yaml"}',
+            f'extension_requests:{STORE_OID}={store}',
+            f'extension_requests:{TIMEZONE_OID}={timezone}']
+
+
 def provision(serial, store, timezone):
     if os.geteuid() != 0:
         raise PermissionError('Provisioning requires administrator privileges.')
@@ -144,8 +155,15 @@ def provision(serial, store, timezone):
                         '--max-time', '600', INSTALL_URL, '-o', str(installer)], check=True)
         if not installer.stat().st_size:
             raise RuntimeError('The downloaded installer is empty.')
-        print('Running Puppet Agent installer…', flush=True)
-        subprocess.run(['bash', str(installer)], check=True, stdin=subprocess.DEVNULL)
+        print(f'Running Puppet Agent installer for {validate(serial, store, timezone)[0]}…', flush=True)
+        subprocess.run(installer_command(installer, serial, store, timezone),
+                       check=True, stdin=subprocess.DEVNULL)
+    result = subprocess.run([str(puppet), 'config', 'print', 'certname', '--section', 'agent'],
+                            check=True, capture_output=True, text=True, timeout=30)
+    expected = validate(serial, store, timezone)[0]
+    if result.stdout.strip() != expected:
+        raise RuntimeError(f'Installed agent certname is {result.stdout.strip()!r}; '
+                           f'expected {expected!r}. Stop the agent and inspect its configuration.')
     print('Installer completed. Trusted facts are available after CA signing.', flush=True)
 
 
