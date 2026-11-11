@@ -40,10 +40,10 @@ import sys
 import tempfile
 import threading
 
-TITLE = 'PE Provision Application'
+TITLE = 'PE Provision Script'
 TIMEZONES = ('Eastern', 'Central', 'Mountain', 'Pacific', 'Alaskan', 'Hawaiian')
 STORE_OID = '1.3.6.1.4.1.34380.1.2.1'
-TIMEZONE_OID = '1.3.6.1.4.1.34380.1.2.2'
+TIMEZONE_OID = 'pp_region'
 REGISTERS = ('1', '2', '3')
 ROLE = 'pos_terminal'
 FACTS_PATH = Path('/etc/puppetlabs/facter/facts.d/pe_provision.yaml')
