@@ -8,6 +8,9 @@ GNOME prompts for administrator authentication when Provision is clicked.
 Trusted certificate extensions (values are strings):
   store_number: 1.3.6.1.4.1.34380.1.2.1
   timezone:     1.3.6.1.4.1.34380.1.2.2
+  pp_role:      pos_terminal (registered Puppet extension; no custom mapping)
+Ordinary external fact: register_number (integer 1, 2, or 3), written to
+/etc/puppetlabs/facter/facts.d/pe_provision.yaml before the installer runs.
 On EACH Puppet Server, merge this into custom_trusted_oid_mapping.yaml:
   oid_mapping:
     1.3.6.1.4.1.34380.1.2.1:
@@ -41,24 +44,29 @@ TITLE = 'PE Provision Application'
 TIMEZONES = ('Eastern', 'Central', 'Mountain', 'Pacific', 'Alaskan', 'Hawaiian')
 STORE_OID = '1.3.6.1.4.1.34380.1.2.1'
 TIMEZONE_OID = '1.3.6.1.4.1.34380.1.2.2'
+REGISTERS = ('1', '2', '3')
+ROLE = 'pos_terminal'
+FACTS_PATH = Path('/etc/puppetlabs/facter/facts.d/pe_provision.yaml')
 CONF_DIR = Path('/etc/puppetlabs/puppet')
 INSTALL_URL = 'https://pe.caffeine.lan:8140/packages/current/install.bash'
 
 
-def validate(serial, store, timezone):
+def validate(serial, store, timezone, register):
     if not re.fullmatch(r'[A-Za-z0-9]{1,63}', serial):
         raise ValueError('Serial Number must contain 1–63 ASCII letters or numbers.')
     if not re.fullmatch(r'[0-9]+', store) or not 1 <= int(store) <= 1000000:
         raise ValueError('Store Number must be an integer from 1 to 1000000.')
     if timezone not in TIMEZONES:
         raise ValueError('Select a Timezone from the list.')
+    if register not in REGISTERS:
+        raise ValueError('Select a Register Number of 1, 2, or 3.')
     return serial.lower() + '.caffeine.lan', str(int(store)), timezone
 
 
-def configuration(serial, store, timezone, directory):
-    """Build both files before writing either; preserve other config settings."""
+def configuration(serial, store, timezone, register, directory, facts_path=FACTS_PATH):
+    """Build configuration and external facts before writing any files; preserve other config settings."""
     import yaml
-    certname, store, timezone = validate(serial, store, timezone)
+    certname, store, timezone = validate(serial, store, timezone, register)
     config = configparser.ConfigParser(interpolation=None, strict=True)
     config.optionxform = str
     path = directory / 'puppet.conf'
@@ -87,7 +95,16 @@ def configuration(serial, store, timezone, directory):
         raise ValueError('Existing extension_requests must be a YAML mapping.')
     extensions[STORE_OID] = store
     extensions[TIMEZONE_OID] = timezone
-    return {path: output.getvalue(), csr_path: yaml.safe_dump(data, sort_keys=False)}
+    extensions.pop('1.3.6.1.4.1.34380.1.1.13', None)
+    extensions['pp_role'] = ROLE
+    facts = yaml.safe_load(facts_path.read_text()) if facts_path.exists() else {}
+    if facts is None:
+        facts = {}
+    if not isinstance(facts, dict):
+        raise ValueError('Existing external facts file must contain a YAML mapping.')
+    facts['register_number'] = int(register)
+    return {path: output.getvalue(), csr_path: yaml.safe_dump(data, sort_keys=False),
+            facts_path: yaml.safe_dump(facts, sort_keys=False)}
 
 
 def write_configuration(files):
@@ -113,21 +130,22 @@ def write_configuration(files):
                 os.unlink(temporary)
 
 
-def installer_command(installer, serial, store, timezone):
+def installer_command(installer, serial, store, timezone, register):
     """Give the installer the identity before its initial Puppet run."""
-    certname, store, timezone = validate(serial, store, timezone)
+    certname, store, timezone = validate(serial, store, timezone, register)
     return ['bash', str(installer),
             f'main:certname={certname}',
             f'agent:certname={certname}',
             f'main:csr_attributes={CONF_DIR / "csr_attributes.yaml"}',
             f'extension_requests:{STORE_OID}={store}',
-            f'extension_requests:{TIMEZONE_OID}={timezone}']
+            f'extension_requests:{TIMEZONE_OID}={timezone}',
+            f'extension_requests:pp_role={ROLE}']
 
 
-def provision(serial, store, timezone):
+def provision(serial, store, timezone, register):
     if os.geteuid() != 0:
         raise PermissionError('Provisioning requires administrator privileges.')
-    validate(serial, store, timezone)
+    validate(serial, store, timezone, register)
     import yaml  # Verify dependency before changing files.
     for command in ('curl', 'bash'):
         if not shutil.which(command):
@@ -144,7 +162,7 @@ def provision(serial, store, timezone):
             if any(p.name != 'ca.pem' for p in (ssl / subdir).glob('*.pem')):
                 raise RuntimeError('Existing Puppet identity detected. Have an administrator '
                                    'retire its certificate/CSR before provisioning again.')
-    files = configuration(serial, store, timezone, CONF_DIR)
+    files = configuration(serial, store, timezone, register, CONF_DIR)
     write_configuration(files)
     # Equivalent to curl -k URL | sudo bash, but a failed download cannot
     # execute a partial installer. This helper is already running as root.
@@ -155,12 +173,12 @@ def provision(serial, store, timezone):
                         '--max-time', '600', INSTALL_URL, '-o', str(installer)], check=True)
         if not installer.stat().st_size:
             raise RuntimeError('The downloaded installer is empty.')
-        print(f'Running Puppet Agent installer for {validate(serial, store, timezone)[0]}…', flush=True)
-        subprocess.run(installer_command(installer, serial, store, timezone),
+        print(f'Running Puppet Agent installer for {validate(serial, store, timezone, register)[0]}…', flush=True)
+        subprocess.run(installer_command(installer, serial, store, timezone, register),
                        check=True, stdin=subprocess.DEVNULL)
     result = subprocess.run([str(puppet), 'config', 'print', 'certname', '--section', 'agent'],
                             check=True, capture_output=True, text=True, timeout=30)
-    expected = validate(serial, store, timezone)[0]
+    expected = validate(serial, store, timezone, register)[0]
     if result.stdout.strip() != expected:
         raise RuntimeError(f'Installed agent certname is {result.stdout.strip()!r}; '
                            f'expected {expected!r}. Stop the agent and inspect its configuration.')
@@ -173,7 +191,7 @@ def launch_gui():
 
     root = tk.Tk()
     root.title(TITLE)
-    root.geometry('640x540')
+    root.geometry('640x640')
     root.minsize(560, 480)
     # Replace Tk's default window icon. GNOME may omit title-bar icons entirely.
     icon = tk.PhotoImage(width=32, height=32)
@@ -190,6 +208,7 @@ def launch_gui():
     serial = tk.StringVar()
     store = tk.StringVar()
     timezone = tk.StringVar()
+    register = tk.StringVar()
     serial_check = (root.register(lambda s: re.fullmatch(r'[A-Za-z0-9]{0,63}', s) is not None), '%P')
     store_check = (root.register(lambda s: not s or (re.fullmatch(r'[0-9]{1,7}', s) is not None
                                                    and 1 <= int(s) <= 1000000)), '%P')
@@ -203,18 +222,23 @@ def launch_gui():
     ttk.Label(frame, text='Timezone').grid(row=3, column=0, sticky='w', pady=8)
     combo = ttk.Combobox(frame, textvariable=timezone, values=TIMEZONES, state='readonly')
     combo.grid(row=3, column=1, sticky='ew', pady=8)
+    ttk.Label(frame, text='Register Number').grid(row=4, column=0, sticky='w', pady=8)
+    register_combo = ttk.Combobox(frame, textvariable=register, values=REGISTERS, state='readonly')
+    register_combo.grid(row=4, column=1, sticky='ew', pady=8)
+    ttk.Label(frame, text='Role').grid(row=5, column=0, sticky='w', pady=8)
+    ttk.Label(frame, text=ROLE).grid(row=5, column=1, sticky='w', pady=8)
     preview = tk.StringVar(value='Certname: —')
     serial.trace_add('write', lambda *_: preview.set(
         'Certname: ' + (serial.get().lower() + '.caffeine.lan' if serial.get() else '—')))
-    ttk.Label(frame, textvariable=preview).grid(row=4, column=0, columnspan=2, sticky='w', pady=10)
+    ttk.Label(frame, textvariable=preview).grid(row=6, column=0, columnspan=2, sticky='w', pady=10)
     ttk.Label(frame, text='Creates Puppet configuration, then installs Puppet Agent.\n'
               'Administrator authentication is required.', wraplength=540).grid(
-                  row=5, column=0, columnspan=2, sticky='w', pady=(0, 12))
+                  row=7, column=0, columnspan=2, sticky='w', pady=(0, 12))
     messages = queue.Queue()
     busy = False
     log = tk.Text(frame, height=9, wrap='word', state='disabled')
-    log.grid(row=7, column=0, columnspan=2, sticky='nsew', pady=(12, 0))
-    frame.rowconfigure(7, weight=1)
+    log.grid(row=9, column=0, columnspan=2, sticky='nsew', pady=(12, 0))
+    frame.rowconfigure(9, weight=1)
 
     def worker(values):
         try:
@@ -233,20 +257,20 @@ def launch_gui():
 
     def start():
         nonlocal busy
-        values = (serial.get(), store.get(), timezone.get())
+        values = (serial.get(), store.get(), timezone.get(), register.get())
         try:
             validate(*values)
         except ValueError as exc:
             messagebox.showerror(TITLE, str(exc), parent=root)
             return
         busy = True
-        for widget in [*controls, combo, button]:
+        for widget in [*controls, combo, register_combo, button]:
             widget.configure(state='disabled')
         messages.put(('log', '\nStarting provisioning…\n'))
         threading.Thread(target=worker, args=(values,), daemon=True).start()
 
     button = ttk.Button(frame, text='Provision and Install', command=start)
-    button.grid(row=6, column=0, columnspan=2, sticky='ew')
+    button.grid(row=8, column=0, columnspan=2, sticky='ew')
 
     def poll():
         nonlocal busy
@@ -262,6 +286,7 @@ def launch_gui():
                 for widget in [*controls, button]:
                     widget.configure(state='normal')
                 combo.configure(state='readonly')
+                register_combo.configure(state='readonly')
                 if value == 0:
                     messagebox.showinfo(TITLE, 'Puppet Agent installation completed.\n'
                                         'Certificate signing may still be required.', parent=root)
@@ -285,7 +310,7 @@ def launch_gui():
 def main():
     parser = argparse.ArgumentParser(description=TITLE, epilog=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--provision', nargs=3, metavar=('SERIAL', 'STORE', 'TIMEZONE'),
+    parser.add_argument('--provision', nargs=4, metavar=('SERIAL', 'STORE', 'TIMEZONE', 'REGISTER'),
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.provision:

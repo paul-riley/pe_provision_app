@@ -1,6 +1,6 @@
 # PE Provision Application
 
-A single-file Python/Tkinter desktop application for provisioning a Puppet Agent on an Ubuntu machine running GNOME. It collects a serial number, store number, and timezone, writes the Puppet configuration, then downloads and runs the Puppet Agent installer from `pe.caffeine.lan`.
+A single-file Python/Tkinter desktop application for provisioning a Puppet Agent on an Ubuntu machine running GNOME. It collects a serial number, store number, timezone, and register number, writes the Puppet configuration, then downloads and runs the Puppet Agent installer from `pe.caffeine.lan`.
 
 The window is titled **PE Provision Application** and uses an embedded custom icon instead of the default Tk icon. GNOME controls whether an icon appears in the title bar.
 
@@ -39,9 +39,10 @@ The application code is contained in this one Python file; no separate images or
 1. Enter the **Serial Number**.
 2. Enter the **Store Number**.
 3. Select a **Timezone**.
-4. Check the displayed certname and click **Provision and Install**.
-5. Complete the GNOME administrator authentication prompt.
-6. Watch the log panel for progress and the completion or error dialog.
+4. Select a **Register Number** of **1**, **2**, or **3**. The displayed **Role** is fixed to `pos_terminal`.
+5. Check the displayed certname and click **Provision and Install**.
+6. Complete the GNOME administrator authentication prompt.
+7. Watch the log panel for progress and the completion or error dialog.
 
 Keep the application open until provisioning finishes. Certificate signing may still be required after the installer completes.
 
@@ -52,6 +53,9 @@ Keep the application open until provisioning finishes. Certificate signing may s
 | Serial Number | 1–63 ASCII letters or digits | Lowercased and suffixed with `.caffeine.lan` to form the certname |
 | Store Number | An integer from `1` through `1000000` | Stored as a string in a certificate extension; leading zeros are removed |
 | Timezone | Eastern, Central, Mountain, Pacific, Alaskan, or Hawaiian | The selected label is stored in a certificate extension |
+
+| Register Number | Dropdown: 1, 2, or 3 | Stored as the ordinary integer fact `register_number` |
+| Role | Fixed: `pos_terminal` | Requested as the trusted certificate extension `pp_role` |
 
 For example, serial number `ABC123`, store number `42`, and timezone `Mountain` produce certname `abc123.caffeine.lan`.
 
@@ -65,7 +69,7 @@ The application performs these steps in an administrator helper process while th
 2. Checks for an existing Puppet certificate, CSR, or private key. If found, provisioning stops before writing configuration.
 3. Builds the Puppet configuration and CSR extension requests.
 4. Backs up existing configuration files beside the originals using a `.bak-<timestamp>` suffix.
-5. Writes the configuration files.
+5. Writes the configuration files and the ordinary register fact before installation.
 6. Downloads the installer into a temporary directory and runs it with Bash as root.
 
 ### Puppet configuration
@@ -88,9 +92,26 @@ It also creates or updates `/etc/puppetlabs/puppet/csr_attributes.yaml`:
 extension_requests:
   1.3.6.1.4.1.34380.1.2.1: '42'
   1.3.6.1.4.1.34380.1.2.2: Mountain
+  pp_role: pos_terminal
 ```
 
 Existing unrelated YAML data is preserved, including other extension requests and custom attributes. Comments and original formatting are not preserved. The application refuses to replace either configuration file if it is a symbolic link.
+
+### Ordinary register fact
+
+The application creates or updates `/etc/puppetlabs/facter/facts.d/pe_provision.yaml` before running the installer:
+
+```yaml
+register_number: 1
+```
+
+The value is an integer. Existing unrelated keys in this file are preserved, and an existing file is backed up beside the original before replacement. In Puppet manifests, use:
+
+```puppet
+$register_number = $facts['register_number']
+```
+
+This is an ordinary, non-trusted external fact and can change independently of the node certificate. Avoid defining `register_number` in other fact sources.
 
 ### Agent installer
 
@@ -100,15 +121,15 @@ The requested installation command is:
 curl -k https://pe.caffeine.lan:8140/packages/current/install.bash | sudo bash
 ```
 
-The application implements this as a separate download followed by execution. It uses `curl -f -k -sS -L`, a 30-second connection timeout, and a 600-second overall download timeout. Bash runs only after a successful, nonempty download. The application passes the serial-based certname explicitly as both `main:certname` and `agent:certname`, along with the CSR path and both extension requests, so the installer receives them before its initial Puppet run. It checks the effective agent certname after installation. The helper already runs as root, so it does not invoke `sudo` again.
+The application implements this as a separate download followed by execution. It uses `curl -f -k -sS -L`, a 30-second connection timeout, and a 600-second overall download timeout. Bash runs only after a successful, nonempty download. The application passes the serial-based certname explicitly as both `main:certname` and `agent:certname`, along with the CSR path and all three extension requests, so the installer receives them before its initial Puppet run. It checks the effective agent certname after installation. The helper already runs as root, so it does not invoke `sudo` again.
 
 The `-k` option disables TLS certificate verification, matching the requested command. Installer output appears in the GUI log. The temporary download is removed when the helper exits normally, including handled failures.
 
 ## Configure trusted facts on Puppet Server
 
-Store number and timezone are requested certificate extensions. They become trusted facts when the CA signs the agent's certificate with those extensions included.
+Store number, timezone, and the fixed role are requested certificate extensions. They become trusted facts when the CA signs the agent's certificate with those extensions included.
 
-The application uses these site-specific private OIDs:
+The application uses these site-specific private OIDs for store and timezone:
 
 | OID | Intended short name | Example value |
 | --- | --- | --- |
@@ -149,7 +170,15 @@ $store_number = $trusted['extensions']['1.3.6.1.4.1.34380.1.2.1']
 $timezone = $trusted['extensions']['1.3.6.1.4.1.34380.1.2.2']
 ```
 
-Both extension values are strings. The application does not sign certificates or configure CA autosigning.
+The role uses Puppet's registered `pp_role` extension (`1.3.6.1.4.1.34380.1.1.13`), so it needs no custom OID mapping. Read it with:
+
+```puppet
+$role = $trusted['extensions']['pp_role'] # pos_terminal
+```
+
+Setting this metadata does not automatically include a Puppet role class; your classification or manifests must use it.
+
+All three certificate extension values are strings. The application does not sign certificates or configure CA autosigning.
 
 See Puppet's documentation for [certificate extension requests](https://help.puppet.com/core/current/Content/PuppetCore/csr_extension_requests.htm) and [custom trusted OID mappings](https://help.puppet.com/core/current/content/puppetcore/config_file_oid_map.htm).
 
@@ -164,7 +193,7 @@ See Puppet's documentation for [certificate extension requests](https://help.pup
 | Installer fails | Read the GUI log and resolve the reported installer error. Configuration files remain in place; they are not automatically rolled back. |
 | Trusted facts are absent | Confirm the certificate was signed with the requested extensions. For named keys, check the OID mapping on every relevant Puppet Server and restart `puppetserver`. |
 
-Certificate extensions are fixed when the certificate is signed. Changing store or timezone metadata on an enrolled machine requires an administrator-managed certificate replacement process.
+Certificate extensions are fixed when the certificate is signed. Changing store, timezone, or role metadata on an enrolled machine requires an administrator-managed certificate replacement process.
 
 Backups are stored alongside the configuration files, for example:
 
@@ -173,8 +202,8 @@ Backups are stored alongside the configuration files, for example:
 /etc/puppetlabs/puppet/csr_attributes.yaml.bak-<timestamp>
 ```
 
-An administrator can restore the appropriate backups if needed. Newly created files have no previous version to restore. File replacement is atomic for each file individually; the two configuration writes and agent installation are not one transaction.
+An administrator can restore the appropriate backups if needed. Newly created files have no previous version to restore. File replacement is atomic for each file individually; the configuration and external-fact writes and agent installation are not one transaction.
 
 ## Validation status
 
-Python compilation and checks for input validation, preservation of unrelated configuration data, extension values, and backup creation have passed. The GNOME interface, privileged authentication flow, and real Puppet Agent installation require validation on the target Ubuntu machine.
+Python compilation and checks for input validation, preservation of unrelated configuration data, extension values (including the fixed role), all three register choices, integer external fact generation, installer arguments, and backup creation have passed. The GNOME interface, privileged authentication flow, and real Puppet Agent installation require validation on the target Ubuntu machine.
